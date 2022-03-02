@@ -1,5 +1,4 @@
 use axum::{
-    // extract::Path,
     http::{header::LOCATION, HeaderMap, StatusCode},
     // response::{Redirect, IntoResponse},
     routing::{get, get_service, patch, post, MethodRouter},
@@ -98,7 +97,7 @@ async fn main() {
         .nest("/static", static_redirect("./static"))
         .layer(AddExtensionLayer::new(db))
         .layer(AddExtensionLayer::new(redis_client));
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8000));
     println!("listening on {}", &addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -109,7 +108,7 @@ async fn main() {
 // 首页
 async fn index_handler() -> (StatusCode, HeaderMap, ()) {
     let mut headers = HeaderMap::new();
-    headers.insert(LOCATION, "/static/html/index.html".parse().unwrap());
+    headers.insert(LOCATION, "/index.html".parse().unwrap());
     (StatusCode::FOUND, headers, ())
 }
 

@@ -2,6 +2,7 @@ use crate::entity::prelude::{
     IhAreas, IhFacilities, IhHouseFacilities, IhHouseImages, IhHouses, IhOrders, IhUsers,
 };
 use crate::entity::{ih_house_facilities, ih_house_images, ih_houses, ih_orders};
+use crate::utils::constants::OrderStatus;
 use crate::utils::{
     constants,
     jwt::AuthUser,
@@ -12,7 +13,7 @@ use axum::{
     Json,
 };
 use chrono::prelude::*;
-use redis::{AsyncCommands, Client};
+use redis::{aio::Connection, AsyncCommands, Client};
 use sea_orm::ActiveModelTrait;
 use sea_orm::{entity::*, query::*, DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
@@ -451,93 +452,7 @@ pub async fn get_house_info(
         // 缓存中存在
         house_info = serde_json::from_str(&cache).unwrap();
     } else {
-        let house = IhHouses::find_by_id(house_id).one(&db).await.unwrap();
-        let house = house
-            .ok_or(RetError::DATAERR("house_id不存在".to_string()))
-            .unwrap();
-        // 获取images
-        let images = IhHouseImages::find()
-            .filter(ih_house_images::Column::HouseId.eq(house.id))
-            .all(&db)
-            .await
-            .unwrap();
-        let mut img_urls: Vec<String> = Vec::new();
-        for img in images {
-            img_urls.push(img.image_url.unwrap_or("".to_string()));
-        }
-        // 获取owner
-        let owner = IhUsers::find_by_id(house.user_id.unwrap())
-            .one(&db)
-            .await
-            .unwrap();
-        let owner = owner
-            .ok_or(RetError::DATAERR("获取owner失败".to_string()))
-            .unwrap();
-        // 获取facilities
-        let facilities_model = IhHouseFacilities::find()
-            .filter(ih_house_facilities::Column::HouseId.eq(house.id))
-            .all(&db)
-            .await
-            .unwrap();
-        let mut facilities: Vec<i32> = Vec::new();
-        for fac in facilities_model {
-            facilities.push(fac.facility_id.unwrap());
-        }
-        // 获取comments
-        let orders = IhOrders::find()
-            .filter(ih_orders::Column::HouseId.eq(house.id))
-            .filter(ih_orders::Column::Comment.is_not_null())
-            .limit(constants::COMMENT_DISPLAY_COUNTS)
-            .all(&db)
-            .await
-            .unwrap();
-        let mut comments: Vec<CommentRes> = Vec::new();
-        for order in orders {
-            let user = IhUsers::find_by_id(order.user_id.unwrap())
-                .one(&db)
-                .await
-                .unwrap()
-                .unwrap();
-            comments.push(CommentRes {
-                user_name: user.name.unwrap(),
-                comment_date: order
-                    .updated_date
-                    .unwrap()
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string(),
-                comment: order.comment.unwrap_or("".to_string()),
-            });
-        }
-
-        house_info = HouseInfo {
-            img_urls,
-            title: house.title.unwrap(),
-            price: house.price.unwrap(),
-            owner_id: house.user_id.unwrap(),
-            owner_img_url: owner.image_url.unwrap_or("".to_string()),
-            owner_name: owner.name.unwrap(),
-            address: house.address.unwrap(),
-            room_count: house.room_count.unwrap(),
-            acreage: house.acreage.unwrap(),
-            unit: house.unit.unwrap(),
-            capacity: house.capacity.unwrap(),
-            beds: house.beds.unwrap(),
-            deposit: house.deposit.unwrap(),
-            min_days: house.min_days.unwrap(),
-            max_days: house.max_days.unwrap(),
-            facilities,
-            comments,
-        };
-        con.hset::<&str, i32, String, i32>(
-            "ih_house_info",
-            house_id,
-            serde_json::to_string(&house_info.clone()).unwrap(),
-        )
-        .await
-        .unwrap();
-        con.expire::<&str, i32>("ih_house_info", constants::HOUSE_REDIS_EXPIRES)
-            .await
-            .unwrap();
+        house_info = update_house_info_cache(con, house_id, db).await;
     }
 
     Ok(Json(ResponseInfo {
@@ -548,10 +463,105 @@ pub async fn get_house_info(
         },
     }))
 }
+// 更新缓存中的房屋详情
+pub async fn update_house_info_cache(
+    mut con: Connection,
+    house_id: i32,
+    db: DatabaseConnection,
+) -> HouseInfo {
+    let house = IhHouses::find_by_id(house_id).one(&db).await.unwrap();
+    let house = house
+        .ok_or(RetError::DATAERR("house_id不存在".to_string()))
+        .unwrap();
+    // 获取images
+    let images = IhHouseImages::find()
+        .filter(ih_house_images::Column::HouseId.eq(house.id))
+        .all(&db)
+        .await
+        .unwrap();
+    let mut img_urls: Vec<String> = Vec::new();
+    for img in images {
+        img_urls.push(img.image_url.unwrap_or("".to_string()));
+    }
+    // 获取owner
+    let owner = IhUsers::find_by_id(house.user_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap();
+    let owner = owner
+        .ok_or(RetError::DATAERR("获取owner失败".to_string()))
+        .unwrap();
+    // 获取facilities
+    let facilities_model = IhHouseFacilities::find()
+        .filter(ih_house_facilities::Column::HouseId.eq(house.id))
+        .all(&db)
+        .await
+        .unwrap();
+    let mut facilities: Vec<i32> = Vec::new();
+    for fac in facilities_model {
+        facilities.push(fac.facility_id.unwrap());
+    }
+    // 获取comments
+    let orders = IhOrders::find()
+        .filter(ih_orders::Column::HouseId.eq(house.id))
+        .filter(ih_orders::Column::Comment.is_not_null())
+        .filter(ih_orders::Column::Status.eq(OrderStatus::Completed.get_info().to_string()))
+        .limit(constants::COMMENT_DISPLAY_COUNTS)
+        .all(&db)
+        .await
+        .unwrap();
+    let mut comments: Vec<CommentRes> = Vec::new();
+    for order in orders {
+        let user = IhUsers::find_by_id(order.user_id.unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        comments.push(CommentRes {
+            user_name: user.name.unwrap(),
+            comment_date: order
+                .updated_date
+                .unwrap()
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+            comment: order.comment.unwrap_or("".to_string()),
+        });
+    }
+
+    let house_info = HouseInfo {
+        img_urls,
+        title: house.title.unwrap(),
+        price: house.price.unwrap(),
+        owner_id: house.user_id.unwrap(),
+        owner_img_url: owner.image_url.unwrap_or("".to_string()),
+        owner_name: owner.name.unwrap(),
+        address: house.address.unwrap(),
+        room_count: house.room_count.unwrap(),
+        acreage: house.acreage.unwrap(),
+        unit: house.unit.unwrap(),
+        capacity: house.capacity.unwrap(),
+        beds: house.beds.unwrap(),
+        deposit: house.deposit.unwrap(),
+        min_days: house.min_days.unwrap(),
+        max_days: house.max_days.unwrap(),
+        facilities,
+        comments,
+    };
+    con.hset::<&str, i32, String, i32>(
+        "ih_house_info",
+        house_id,
+        serde_json::to_string(&house_info.clone()).unwrap(),
+    )
+    .await
+    .unwrap();
+    con.expire::<&str, i32>("ih_house_info", constants::HOUSE_REDIS_EXPIRES)
+        .await
+        .unwrap();
+    house_info
+}
 
 // 获取首页房屋信息
 pub async fn get_index_houses(
-    _auth_user: AuthUser,
     Extension(db): Extension<DatabaseConnection>,
     Extension(redis_client): Extension<Client>,
 ) -> Result<Json<ResponseInfo<Vec<IndexHouseRes>>>, RetError> {
@@ -598,7 +608,6 @@ pub async fn get_index_houses(
 
 // 搜索房屋
 pub async fn get_search_houses(
-    _auth_user: AuthUser,
     Query(params): Query<HashMap<String, String>>,
     Extension(db): Extension<DatabaseConnection>,
     Extension(redis_client): Extension<Client>,

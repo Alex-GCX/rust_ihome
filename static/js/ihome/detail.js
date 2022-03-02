@@ -46,6 +46,8 @@ $(document).ready(function(){
                     var url = '/login.html';
                 }
                 $('.book-house').attr('href', url)
+            } else if (resp.errno == "4003") {
+                location.href='/login.html';
             } else {
                 //获取失败
                 alert(resp.errmsg)

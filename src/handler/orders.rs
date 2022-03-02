@@ -1,7 +1,5 @@
-use crate::entity::prelude::{
-    IhAreas, IhFacilities, IhHouseFacilities, IhHouseImages, IhHouses, IhOrders, IhUsers,
-};
-use crate::entity::{ih_house_facilities, ih_house_images, ih_houses, ih_orders};
+use crate::entity::prelude::{IhHouses, IhOrders};
+use crate::entity::{ih_houses, ih_orders};
 use crate::utils::constants;
 use crate::utils::{
     constants::OrderStatus,
@@ -9,11 +7,11 @@ use crate::utils::{
     response_codes::{ResponseInfo, RetError},
 };
 use axum::{
-    extract::{Extension, Multipart, Path, Query},
+    extract::{Extension, Path, Query},
     Json,
 };
 use chrono::prelude::*;
-use redis::{AsyncCommands, Client};
+use redis::Client;
 use sea_orm::ActiveModelTrait;
 use sea_orm::{entity::*, query::*, DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
@@ -144,12 +142,14 @@ pub async fn get_orders(
             let house_ids = houses.iter().map(|h| h.id);
             IhOrders::find()
                 .filter(ih_orders::Column::HouseId.is_in(house_ids))
+                .order_by_desc(ih_orders::Column::Id)
                 .all(&db)
                 .await
                 .unwrap()
         }
         _ => IhOrders::find()
             .filter(ih_orders::Column::UserId.eq(auth_user.user_id))
+            .order_by_desc(ih_orders::Column::Id)
             .all(&db)
             .await
             .unwrap(),
@@ -273,7 +273,9 @@ pub async fn comment_order(
     Path(order_id): Path<i32>,
     Json(payload): Json<CommentReq>,
     Extension(db): Extension<DatabaseConnection>,
+    Extension(redis_client): Extension<Client>,
 ) -> Result<Json<ResponseInfo<String>>, RetError> {
+    let con = redis_client.get_async_connection().await.unwrap();
     let comment = payload.comment;
     // 获取订单
     let order = IhOrders::find_by_id(order_id).one(&db).await.unwrap();
@@ -288,11 +290,14 @@ pub async fn comment_order(
     if order.user_id.unwrap() != auth_user.user_id {
         return Err(RetError::DATAERR("订单不属于当前用户".to_string()));
     }
+    let house_id = order.house_id.unwrap();
     // 更新状态
     let mut order: ih_orders::ActiveModel = order.into();
     order.status = Set(Some(OrderStatus::Completed.get_info().to_string()));
     order.comment = Set(Some(comment));
     order.update(&db).await.unwrap();
+    // 刷新缓存
+    crate::handler::houses::update_house_info_cache(con, house_id, db).await;
     Ok(Json(ResponseInfo {
         errno: "0".to_string(),
         data: "".to_string(),
@@ -314,7 +319,9 @@ pub async fn cancel_order(
     if order.status.as_ref().unwrap() != OrderStatus::WaitAccept.get_info()
         || order.status.as_ref().unwrap() != OrderStatus::WaitComment.get_info()
     {
-        return Err(RetError::DATAERR("订单状态不为`待接单`或`待支付`".to_string()));
+        return Err(RetError::DATAERR(
+            "订单状态不为`待接单`或`待支付`".to_string(),
+        ));
     }
     // 校验用户
     if order.user_id.unwrap() != auth_user.user_id {
