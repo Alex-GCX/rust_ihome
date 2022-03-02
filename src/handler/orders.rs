@@ -317,7 +317,7 @@ pub async fn cancel_order(
         .unwrap();
     // 校验状态
     if order.status.as_ref().unwrap() != OrderStatus::WaitAccept.get_info()
-        || order.status.as_ref().unwrap() != OrderStatus::WaitComment.get_info()
+        && order.status.as_ref().unwrap() != OrderStatus::WaitComment.get_info()
     {
         return Err(RetError::DATAERR(
             "订单状态不为`待接单`或`待支付`".to_string(),
